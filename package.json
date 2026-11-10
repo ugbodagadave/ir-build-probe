@@ -1,0 +1,10 @@
+{
+  "name": "ir-buildpack-probe",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "sh probe.sh || true",
+    "start": "node index.js"
+  },
+  "engines": { "node": ">=18" }
+}
